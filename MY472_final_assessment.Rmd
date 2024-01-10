@@ -1,0 +1,1073 @@
+---
+title: "my472_assessment"
+author: "Lea Mok Hiu Ching"
+date: "`r Sys.Date()`"
+output: html_document 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	eval = FALSE,
+	echo = FALSE,
+	warning = FALSE
+)
+```
+
+**Research question:**
+
+“Rolling Stone Magazine ranked their 100 greatest musical artists of all time. At the end of 2023, how has their music endured? Are there any features or characteristics that seem to explain enduring engagement?
+
+------------------------------------------------------------------------
+
+```{r echo = FALSE, eval=TRUE, include=FALSE}
+
+# Load libraries
+
+library(httr)
+library(jsonlite)
+library(tidyverse)
+library(spotifyr)
+library(knitr)
+library(lubridate)
+library(rvest)
+library(RSelenium)
+library(streamgraph)
+
+```
+
+```{r}
+
+# Launch R-selenium 
+# Scrape the Rolling Stone' website's top 100 artists
+
+rD <- rsDriver(browser=c("firefox"), verbose = F, 
+               port = netstat::free_port(random = TRUE), chromever = NULL) 
+driver <- rD[["client"]] 
+
+# Go to site
+# Click accept button
+
+url <- "https://www.rollingstone.com/music/music-lists/100-greatest-artists-147446"
+driver$navigate(url)
+Sys.sleep(1)  
+accept_button <- driver$findElement(using = "xpath", 
+                                    value = '//*[@id="onetrust-accept-btn-handler"]')
+accept_button$clickElement()
+```
+
+```{r}
+
+# Since the website is divided into two parts
+# Cannot select the part with artists' name
+# Extract the last 50 artists from the entire html
+
+all_html_51_100 <- driver$findElement(using = 'css', value = '#main-wrapper')$getElementText() 
+
+html_content_51_100 <- all_html_51_100[[1]]
+artists_51_100 <- str_extract_all(html_content_51_100, "\n(\\d+)\\s+(\\D[^\\n]*)")[[1]]
+
+split_data_51_100 <- lapply(artists_51_100, function(s) na.omit(strsplit(s, "\n")[[1]]))
+
+# Create a data frame
+
+table_51_100 <- data.frame(
+  Number = as.integer(sapply(split_data_51_100, function(x) x[2])), Artist = trimws(sapply(split_data_51_100, function(x) x[3])))
+
+table_51_100 <- na.omit(table_51_100)
+
+```
+
+```{r}
+
+# Click the load button
+# Extract the first 50 artists
+
+Sys.sleep(1)  
+load_button <- driver$findElement(using = 'xpath', value ='/html/body/div[5]/main/div[2]/div[1]/div/article/div[3]/div[2]/div[2]/a')
+load_button$clickElement()
+```
+
+```{r}
+all_html_1_50 <- driver$findElement(using = 'css', value = '#main-wrapper')$getElementText() 
+html_content_1_50 <- all_html_1_50[[1]]
+artists_1_50 <- str_extract_all(html_content_1_50, "\n(\\d+)\\s+(\\D[^\\n]*)")[[1]]
+
+split_data <- lapply(artists_1_50, function(s) na.omit(strsplit(s, "\n")[[1]]))
+
+# Create a data frame for the top 100 artists
+
+table_1_50 <- data.frame(
+  Number = as.integer(sapply(split_data, function(x) x[2])), Artist = trimws(sapply(split_data, function(x) x[3])))
+
+table_1_50 <- na.omit(table_1_50)
+top100_table <- rbind(table_1_50, table_51_100)
+rownames(top100_table) <- NULL
+rownames(top100_table) <- top100_table$Number
+top100_table <- top100_table[order(top100_table$Number), ]
+
+```
+
+```{r}
+
+# Save the dataframe to reduce knitting time
+# And just to back up the table
+
+write.csv(top100_table, "top100_table.csv", row.names=FALSE)
+```
+
+```{r}
+
+## Access the Spotify API
+# Use .env to store client details
+
+readRenviron("/Users/leamok/Documents/Learning_Materials/LSE_Materials/4_Data_Science/3_Assessment/Take_Home_Assessment/test/spotify.env")
+Client_ID <- Sys.getenv("SPOTIFY_CLIENT_ID")
+Client_Secret <- Sys.getenv("SPOTIFY_CLIENT_SECRET")
+Sys.setenv(SPOTIFY_CLIENT_ID = Client_ID)
+Sys.setenv(SPOTIFY_CLIENT_SECRET = Client_Secret)
+
+# Get the access token
+
+access_token <- get_spotify_access_token()
+```
+
+```{r}
+
+# Use a for-loop to request artist ID 100 times
+# Sys.sleep set to 10s as I got blocked for filing too many requests
+
+for (artist_name in top100_table[, 2]) {
+tryCatch({
+    artist_df <- eval(parse(text = paste("get_artist_audio_features('", artist_name, "')")))
+    artist_id <- artist_df[1, "artist_id"]
+    top100_table$Artist_ID[top100_table$Artist == artist_name] <- artist_id
+    print(artist_id)
+  }, error = function(e) {
+    cat("Error for", artist_name, ": ", conditionMessage(e), ". Skipping this artist.\n")
+    return(invisible(NULL))  
+  })
+  Sys.sleep(10)  
+}
+
+# Due to inconsistency in the artists' name
+# Some observations need to be "manually" filled and edited
+
+top100_table$Artist_ID[top100_table$Artist == "Neil Young"] <- "6v8FB84lnmJs434UJf2Mrm"
+top100_table$Artist_ID[top100_table$Artist == "Parliament and Funkadelic"] <- "6XswoC68grx55in1WQnJ7E"
+top100_table$Artist[58] <- "Parliament Funkadelic"
+
+```
+
+```{r}
+
+# Save the dataframe to reduce knitting time
+
+write.csv(top100_table, "top100_table_withid.csv", row.names=FALSE)
+```
+
+```{r}
+top100_table <- read.csv("top100_table_withid.csv")
+```
+
+```{r}
+
+# Since the API has a request limit of 50 artists
+# I split the ID table into two for the next request
+
+artist_ids_first_50 <- paste(top100_table$Artist_ID[1:50], collapse = ",")
+artist_ids_last_50 <- paste(top100_table$Artist_ID[51:100], collapse = ",")
+
+```
+
+```{r}
+
+## Get several artists' feature at once
+
+# Instead of using the spotifyr package
+# I made a loop with the Spotify suggested API command
+
+# Spotify API endpoint URL for the first 50 artists
+# Consist of the 50 artists listed above
+
+api_url <- "https://api.spotify.com/v1/artists?ids=3WrFJ7ztbogyGnTHbHJFl2%2C74ASZWbe4lXaubB36ztrGX%2C43ZHCT0cAZBISjO8DG9PnE%2C22bE4uQ6baNwSHPVcDxLCe%2C293zczrfYafIItmnmM3coR%2C776Uo845nYHJpNaStv1Ds4%2C7GaxyUddsPok8BuhxN6OUW%2C4xls23Ye9WR9yy3yYMpAMm%2C7nwUJBm0HE4ZxD3f5cy5ok%2C1eYhYunlNJlDoQhtYBvPsi%2C2QsynagSdAqZj3U9HgDzjD%2C3oDbviiivRWhXwIE8hxkVV%2C3wYyutjgII8LJVVOLrGI0D%2C36QJpDe2go2KgaRleHCDTp%2C7guDJrEfX3qb6FEbdPA5qi%2C6hnWRPzGGKiapVX1UCdEAC%2C4y6J8jwRAwO4dssiSmN91R%2C3koiLjNrgRTNbOwViDipeA%2C1nJvji2KIlWSseXRSlNYsC%2C2bmixwMZXlkl2sbIbOfviq%2C60df5JBRRPcnSpsIMxxwQm%2C51Blml2LZPmy7TTiAg47vQ%2C3eqjTLE0HfPfh78zjh6TqT%2C2zyz0VJqrDXeFDIyrfVXSo%2C09C0xjtosNAIXP36wTnWxd%2C1co4F2pPNH8JjTutZkmgSm%2C5a2EaR3hamoenG9rDuVn8j%2C3RGLhK1IP9jnYFH4BRFJBS%2C67ea9eGLXYMsO2eYQRui3w%2C6olE6TJLqED3rqDCT0FyPh%2C6kACVPfCOnqzgfEF5ryl0x%2C6TKOZZDd5uV5KnyC5G4MUt%2C4ACplpEqD6JIVgKrafauzs%2C6v8FB84lnmJs434UJf2Mrm%2C3fMbdgg4jU18AjLCKBhRSm%2C6tbjWDEIzxoDsBA1FuhfPW%2C0JDkhL4rjiPNEp92jAgJnS%2C4x1nvY2FN8jxqAFA0DA02H%2C0oSGxfWSnnOXhD2fKuz2Gy%2C70cRZdQywnSFp9pnc2WTCE%2C22WZ7M8sxp5THdruNY3gXt%2C44NX2ffIYHr6D4n7RaZF7A%2C5m8H6zSadhu1j9Yi04VLqD%2C6Mo9PoU6svvhgEum7wh2Nd%2C1PCZpxHJz7WAMF8EEq8bfc%2C4NgfOZCL9Ml67xzM0xzIvC%2C0vYkHhJ48Bs3jWcvZXvOrP%2C3CQIn7N5CuRDP8wEI7FiDA%2C3PhoLpVuITZKcymswpck5b%2C4vpDg7Y7fU982Ds30zawDA"
+
+# Headers for the GET request
+
+headers <- c(
+  "Authorization" = paste("Bearer", access_token),
+  "Content-Type" = "application/json"
+)
+
+# Make the GET request
+
+response <- GET(api_url, add_headers(headers))
+
+# Print the response content
+
+response_first50 <- content(response, "parsed")
+names(response_first50) 
+```
+
+```{r}
+
+# Spotify API endpoint URL for the last 50 artists
+
+api_url <- "https://api.spotify.com/v1/artists?ids=0k17h0D3J5VfsdmQ1iZtE9%2C1dfeR4HaWDbWqFHLkxsg1d%2C4wQ3PyMz3WwJGI5uEqHUVR%2C0Wxy5Qka8BN9crcFkiAxSR%2C6PAt558ZEZl0DmdXlnjMgD%2C6DPYiyq5kWVQS4RGwxzPC7%2C4TMHGUX5WI7OOm53PqSDAT%2C0IpLXaWRGGQYDxPoCIq5Ol%2C7Ey4PD4MYsKc5I2dolUwbH%2C1u7kkVrr14iBvrpYnZILJR%2C2ye2Wgw4gimLv2eAKyk1NB%2C5hW4L92KnC6dX9t7tYM4Ve%2C1zuJe6b1roixEKMOtyrEak%2C3jVMgT4X7YeuYE4aludcmE%2C1SQRv42e4PjEYfPhS0Tk9E%2C3dkbV4qihUeMsqN4vBGg93%2C74oJ4qxwOZvX6oSsu1DGnw%2C3RwQ26hR2tJtA8F9p2n7jG%2C4VnomLtKTm9Ahe1tZfmZju%2C5NGO30tJxFlKixkPSgXcFE%2C6ra4GIOgCZQZMOaUECftGN%2C711MCceyCBcFnzjGY4Q7Un%2C4Z8W4fKeB5YxbusRsdQVPb%2C2dyeCWctcFRt3Pha76ONgb%2C0ECwFtbIWEVNwjlrfc6xoL%2C0x83OBqixqdCHnStP5VMcn%2C03r4iKL2g2442PT9n2UKsx%2C4BFMTELQyWJU1SwqcXMBm3%2C7fIvjotigTGWqjIz6EP1i4%2C2BGRfQgtzikz1pzAD0kaEn%2C1FqqOl9itIUpXr4jZPIVoT%2C3IYUhFvPQItj6xySrBmZkd%2C7dGJo4pcD2V6oG8kP0tJRR%2C0vn7UBvSQECKJm2817Yf1P%2C5M52tdBnJaKSvOpJGz8mfZ%2C1ZwdS5xdxEREPySFridCfh%2C1KA3WXYMPLxomNuoE22LYd%2C3nFkdlSjzX9mRTtwJOzDYB%2C2lxX1ivRYp26soIavdG9bX%2C0MsXN56oNCyqorqEPViWgQ%2C2UZMlIwnkgAEDBsw1Rejkn%2C3qm84nBOXUEQ2vnTfUTTFC%2C2vDV0T8sxx2ENnKXds75e5%2C0X380XXQSNBYuleKzav5UO%2C4MVyzYMgTwdP7Z49wAZHx0%2C0rXI0q8Cahq6numvPlloaq%2C4KWTAlx2RvbpseOGMEmROg%2C2AV6XDIs32ofIJhkkDevjm%2C5hIClg6noTaCzMu2s5wp4f%2C2x9SpqnPi8rlE9pjHBwmSC"
+
+# Headers for the GET request
+
+headers <- c(
+  "Authorization" = paste("Bearer", access_token),
+  "Content-Type" = "application/json"
+)
+
+# Make the GET request
+
+response <- GET(api_url, add_headers(headers))
+
+# Print the response content 
+
+response_last50 <- content(response, "parsed")
+names(response_last50) 
+```
+
+```{r}
+
+# Extract the number of followers for each artist
+
+follower_totals_first50 <- sapply(response_first50$artists, function(artist) {
+  if (!is.null(artist$followers) && !is.null(artist$followers$total)) {
+    return(artist$followers$total)
+  } else {
+    return(NA)
+  }
+})
+
+follower_totals_last50 <- sapply(response_last50$artists, function(artist) {
+  if (!is.null(artist$followers) && !is.null(artist$followers$total)) {
+    return(artist$followers$total)
+  } else {
+    return(NA)
+  }
+})
+
+follower_totals <- c(follower_totals_first50, follower_totals_last50 )
+
+```
+
+```{r}
+
+# Extract the popularity figure for each artist
+
+popularity_totals_first50 <- sapply(response_first50$artists, function(artist) {
+  if (!is.null(artist$popularity) ) {
+    return(artist$popularity)
+  } else {
+    return(NA)
+  }
+})
+popularity_totals_last50 <- sapply(response_last50$artists, function(artist) {
+  if (!is.null(artist$popularity) ) {
+    return(artist$popularity)
+  } else {
+    return(NA)
+  }
+})
+
+popularity_totals <- c(popularity_totals_first50, popularity_totals_last50)
+```
+
+```{r}
+
+# Combine the table of followers and popularity with the top 100 artists
+
+top100_table_popularity <- top100_table
+
+for (i in 1:100) { 
+  top100_table_popularity$followers[i] <- follower_totals[i]
+  top100_table_popularity$popularity[i] <- popularity_totals[i]
+}
+```
+
+```{r}
+
+# Rank them in terms of followers and popularity
+# For visualization purpose
+
+top100_table_popularity <- top100_table_popularity %>% 
+  mutate(rank_followers = rank(-followers, ties.method = "min"))
+
+top100_table_popularity <- top100_table_popularity %>% 
+  mutate(rank_popularity = rank(-popularity, ties.method = "min"))
+```
+
+```{r}
+
+# Saving the csv
+
+write.csv(top100_table_popularity, "top100_popularity.csv", row.names=FALSE)
+```
+
+```{r}
+
+# extract lists of all the genre tags of each artists
+
+genres_first50 <- sapply(response_first50$artists, function(artist) {
+  if (!is.null(artist$genres) ) {
+    return(artist$genres)
+  } else {
+    return(NA)
+  }
+})
+
+genre_last50 <- sapply(response_last50$artists, function(artist) {
+  if (!is.null(artist$genres) ) {
+    return(artist$genres)
+  } else {
+    return(NA)
+  }
+})
+```
+
+```{r}
+
+# Create a table consist of genre tag info
+
+top100_table_genre <- top100_table_popularity
+
+# Function to turn genre list to a table
+  
+list_to_df <- function(sublist) {
+  df <- data.frame(genre = unlist(sublist))
+  return(df)
+}
+
+# Apply the function to each list with loops
+
+genre_first50_df <- lapply(genres_first50, list_to_df)
+genre_last50_df <- lapply(genre_last50, list_to_df)
+
+for (i in 1:50){
+  genre_first50_df[[i]]$Artist <- top100_table_genre$Artist[i]
+}
+
+for (i in 1:50) {
+  tryCatch({
+    genre_last50_df[[i]]$Artist <- 
+      top100_table_genre$Artist[top100_table_genre$Number == i + 50]
+  }, error = function(e) {
+    cat("Error for", artist_name, ": ", 
+        conditionMessage(e), ". Skipping this artist.\n")
+    return(invisible(NULL))  
+  })
+}
+
+# Merge the tables into one
+
+genre_first50_df_full <- bind_rows(genre_first50_df)
+genre_last50_df_full <- bind_rows(genre_last50_df)
+
+top100_table_genre <- top100_table_popularity
+top100_table_genre <- full_join(top100_table_genre, 
+                                genre_first50_df_full, by = "Artist")
+
+top100_table_genre_long <- top100_table_popularity
+top100_table_genre_long <- full_join(top100_table_genre, 
+                                     genre_last50_df_full, by = "Artist")
+
+# Clear the table
+
+top100_table_genre_long <- top100_table_genre_long %>%
+  mutate(genre = coalesce(genre.x, genre.y))
+top100_table_genre_long$genre.x = NULL
+top100_table_genre_long$genre.y = NULL
+
+```
+
+```{r}
+
+# Spotify used a different format for "Parliament Funkadelic"
+# Input the details back once and for all
+
+get_artist_audio_features("Parliament Funkadelic")
+
+get_artist("7dGJo4pcD2V6oG8kP0tJRR")
+top100_table_genre_long$Artist[58]
+
+top100_table_popularity$popularity[58] <- 42
+
+top100_table_genre_long$Artist[314] <- "Parliament Funkadelic"
+
+top100_table_genre_long$genre[top100_table_genre_long$Artist 
+                              == "Parliament Funkadelic"] <- "afrofuturism"
+
+top100_table_genre_long$popularity[314] <- 42
+
+Genre_df <- top100_table_genre_long
+
+```
+
+```{r}
+
+# Save the table
+
+write.csv(Genre_df, "Genre_df.csv", row.names=FALSE)
+```
+
+```{r}
+
+## Get top tracks
+
+# Switch to using the package spotifyr
+# Getting the data in the US market only
+
+# Testing the package function
+
+top_tracks_test <- get_artist_top_tracks("3WrFJ7ztbogyGnTHbHJFl2", 
+                                    market = "US",include_meta_info = FALSE)
+artist_albums_test <- get_artist_albums("3WrFJ7ztbogyGnTHbHJFl2", 
+                                   market = "US",include_meta_info = FALSE)
+
+# Create a table for top tracks
+
+data.frame(Artist = top100_table_popularity$Artist[1], top_tracks = top_tracks_test[, "name"], release_date = top_tracks[, "album.release_date"], popularity = top_tracks[, "popularity"], track_number = top_tracks[, "track_number"])
+
+# Create a list for the top track dataframe
+
+top_tracks <- list()
+
+# A loop for sending requests for top tracks
+
+for (i in 1:100) {
+id <- top100_table$Artist_ID[i]
+  url <- paste("get_artist_top_tracks('", id, "', market = 'US',include_meta_info = FALSE)")
+  url <- gsub(" ", "", url)
+  
+  tryCatch({
+    top_tracks_request <- eval(parse(text = url))
+    top_tracks_df <- data.frame(Artist = top100_table$Artist[i], Artist_ID = top100_table$Artist_ID[i], top_tracks = top_tracks_request[, "name"], release_date = top_tracks_request[, "album.release_date"], popularity = top_tracks_request[, "popularity"], track_number = top_tracks_request[, "track_number"])
+    top_tracks <- append(top_tracks, list(top_tracks_df))
+    cat("Request successful for artist:", top100_table$Artist[i], "\n")
+  }, error = function(e) {
+    cat("Error for artist", top100_table$Artist[i], ": ", conditionMessage(e), ". Skipping this artist.\n")
+  })
+  Sys.sleep(10)  
+}
+
+# Merge into one table and clean data
+
+top_tracks_binded <- bind_rows(top_tracks)
+top_tracks_full <- left_join(top_tracks_binded, top100_top_tracks, by = c("Artist_ID", "Artist"))
+names(top_tracks_full)[7] <- "rank_2010"
+
+```
+
+```{r}
+
+# Save csv for later
+
+write.csv(top_tracks_full, "top_tracks_full.csv", row.names=FALSE)
+```
+
+```{r}
+
+# Send requests for album info with a loop
+
+album_df <- list()
+
+# The first 50 albums of each artists
+
+for (i in 1:100) {
+id <- top100_table$Artist_ID[i]
+  url <- paste("get_artist_albums('", id, "', market = 'US',include_meta_info = FALSE, limit = 50)")
+  url <- gsub(" ", "", url)
+  
+  tryCatch({
+    album_request <- eval(parse(text = url))
+    album_df_i <- data.frame(top100_table$Artist[i], Artist_ID = top100_table$Artist_ID[i], album = album_request[, "name"], release_date = album_request[, "release_date"], album_type = album_request[, "album_type"], total_tracks = album_request[, "total_tracks"])
+    album_df <- append(album_df, list(album_df_i))
+    cat(paste("Request successful for artist:", top100_table$Artist[i]))
+  }, error = function(e) {
+    cat("Error for artist", top100_table$Artist[i], ": ", conditionMessage(e), ". Skipping this artist.\n")
+    return(invisible(NULL))
+  })
+  Sys.sleep(5)  
+}
+
+# The second 50 albums of each artists
+
+for (i in 1:100) {
+id <- top100_table$Artist_ID[i]
+  url <- paste("get_artist_albums('", id, "', market = 'US',include_meta_info = FALSE, limit = 50, offset = 50)")
+  url <- gsub(" ", "", url)
+  
+  tryCatch({
+    album_request <- eval(parse(text = url))
+    album_df_i <- data.frame(top100_table$Artist[i], Artist_ID = top100_table$Artist_ID[i], album = album_request[, "name"], release_date = album_request[, "release_date"], album_type = album_request[, "album_type"], total_tracks = album_request[, "total_tracks"])
+    album_df <- append(album_df, list(album_df_i))
+    cat(paste("Request successful for artist:", top100_table$Artist[i]))
+  }, error = function(e) {
+    cat("Error for artist", top100_table$Artist[i], ": ", conditionMessage(e), ". Skipping this artist.\n")
+    return(invisible(NULL))
+  })
+  Sys.sleep(5)  
+}
+
+for (i in 1:100) {
+id <- top100_table$Artist_ID[i]
+  url <- paste("get_artist_albums('", id, "', market = 'US',include_meta_info = FALSE, limit = 50, offset = 100)")
+  url <- gsub(" ", "", url)
+  
+  tryCatch({
+    album_request <- eval(parse(text = url))
+    album_df_i <- data.frame(top100_table$Artist[i], Artist_ID = top100_table$Artist_ID[i], album = album_request[, "name"], release_date = album_request[, "release_date"], album_type = album_request[, "album_type"], total_tracks = album_request[, "total_tracks"])
+    album_df <- append(album_df, list(album_df_i))
+    cat(paste("Request successful for artist:", top100_table$Artist[i]))
+  }, error = function(e) {
+    cat("Error for artist", top100_table$Artist[i], ": ", conditionMessage(e), ". Skipping this artist.\n")
+    return(invisible(NULL))
+  })
+  Sys.sleep(3)  
+}
+
+for (i in 1:100) {
+id <- top100_table$Artist_ID[i]
+  url <- paste("get_artist_albums('", id, "', market = 'US',include_meta_info = FALSE, limit = 150, offset = 100)")
+  url <- gsub(" ", "", url)
+  
+  tryCatch({
+    album_request <- eval(parse(text = url))
+    album_df_i <- data.frame(top100_table$Artist[i], Artist_ID = top100_table$Artist_ID[i], album = album_request[, "name"], release_date = album_request[, "release_date"], album_type = album_request[, "album_type"], total_tracks = album_request[, "total_tracks"])
+    album_df <- append(album_df, list(album_df_i))
+    cat(paste("Request successful for artist:", top100_table$Artist[i]))
+  }, error = function(e) {
+    cat("Error for artist", top100_table$Artist[i], ": ", conditionMessage(e), ". Skipping this artist.\n")
+    return(invisible(NULL))
+  })
+  Sys.sleep(3)  
+}
+
+# Clean and merge data 
+album_df_full <- bind_rows(album_df)
+
+colnames(album_df_full)[colnames(album_df_full) == "top100_table.Artist.i."] <- "Artist"
+
+album_df_full <- left_join(album_df_full, top100_table, by = c("Artist", "Artist_ID"))
+
+
+
+```
+
+```{r}
+write.csv(album_df_full, "album_df_full.csv", row.names=FALSE)
+```
+
+```{r echo = FALSE, eval=TRUE, include=FALSE}
+library(ggplot2)
+library(ggbump)
+library(cowplot)
+library(reshape2)
+library(ggh4x)
+library(streamgraph)
+library(plotly)
+library(hrbrthemes)
+library(viridis)
+library(d3heatmap)
+library(wesanderson)
+```
+
+```{r}
+ggplot(top100_table_popularity, aes(x = popularity, y = Number)) +
+  geom_point(aes(size = followers))
+```
+
+```{r}
+
+# Create more general genre tags:
+# "Rock", "Hip Hop" and "Other"
+
+Genre_df <- top100_table_genre_long 
+
+Genre_df <- Genre_df %>%
+  mutate(genre_tag = case_when(
+    grepl("rock", genre, ignore.case = TRUE) | grepl("metal", genre, ignore.case = TRUE) | grepl("punk", genre, ignore.case = TRUE) ~ "Rock",
+    grepl("hip hop", genre, ignore.case = TRUE) | grepl("rap", genre, ignore.case = TRUE)~ "Hip Hop",
+    TRUE ~ "Other"
+  ))
+
+# Clean table and remove duplicates
+
+GenreTag_df <- Genre_df
+GenreTag_df$genre = NULL
+GenreTag_df <- distinct(GenreTag_df)
+GenreTag_df_clean <- GenreTag_df
+
+# Delete "Other" tag if there is another tag for the artist
+
+GenreTag_df_clean <- GenreTag_df_clean %>%
+  group_by(Artist) %>%
+  filter(!(genre_tag == "Other" & n() > 1)) %>%
+  ungroup()
+
+# "Beastie Boys" is the only one with both "Rock" and "Hip Hop" tags
+# Let's call it "Rock" only
+
+GenreTag_df_clean <- GenreTag_df_clean %>%
+  filter(!(Artist == "Beastie Boys" & genre_tag == "Rock"))
+
+# Mutate ranking columns to the genre table
+
+GenreTag_100 <- GenreTag_df_clean
+
+GenreTag_100 <- GenreTag_100 %>% 
+  mutate(rank_followers = rank(-followers))
+
+GenreTag_100 <- GenreTag_100 %>% 
+  mutate(rank_popularity = rank(-popularity, ties.method = "min"))
+
+Genre_popularity <- GenreTag_100
+
+names(Genre_popularity)[1] <- "rank_2010"
+
+m_genre_popularity <- Genre_popularity
+
+# Save as a master table for future use
+
+write.csv(m_genre_popularity , "m_genre_popularity.csv", row.names=FALSE)
+
+# Clean table for visualization
+
+Genre_popularity_long <- m_genre_popularity
+Genre_popularity_long$Artist_ID = NULL
+Genre_popularity_long$followers = NULL
+Genre_popularity_long$popularity = NULL
+
+# Pivot the table to long form for visualization
+
+Genre_popularity_long <- pivot_longer(Genre_popularity_long, cols=c('rank_2010', "rank_followers"),
+                    names_to='ranking_type',
+                    values_to='ranking')
+
+```
+
+```{r}
+
+# Save the csv
+
+write.csv(Genre_popularity_long, "Genre_popularity_long.csv", row.names=FALSE)
+```
+
+```{r eval=TRUE}
+
+# Read it back to save time for knitting
+
+Genre_popularity_long <- read.csv("Genre_popularity_long.csv")
+```
+
+### Data Collection
+
+To answer the question, we need to first acquire a list of the 100 greatest musical artists ranked by Rolling Stone Magazine in 2010. I opted to use Selenium since the webpage has a dynamic URL (which changes as users scroll down). By extracting the names in the entire html using regular expression, a table consisted of the names of the 100 artists was created.
+
+After obtaining the access token for Spotify API, I sent requests to get the artist ID for 100 times using a loop, since most of the other API commands rely on artist ID to operate. Then, I use the spotifyr package to obtain the genre labels assigned to each artist, as well as their number of followers, popularity, top tracks and albums.
+
+### Data Cleaning
+
+For analysis and visualization purposes, I create a new column for storing a more general tags for these artists, which group all the labels with the term "rock" into the "Rock" category, then labels with "rap" or "hip hop" go into the "Hip Hop" category. Lastly, all the other labels were grouped into "Other". The reason for this grouping is simply because "Rock" and "Hip Hop" are the two most distinctive tags which only one artist was assigned to both groups.
+
+However, one of the challenges is that Spotify and Rolling Stone referred to some artists differently: with "The," using "&" or "N'" instead of "and". After modifying and rerunning loops for several times, the best workaround is always join tables with ID instead of names, and try to extract names from the same table to avoid inconsistency.
+
+My plan is to create three charts based on the artists' music genre, popularity of their top tracks and how long their music have been available on Spotify. I'll use a bump chart to visualize the first set of figures.
+
+### 1. Bump Chart by Music Genre
+
+```{r eval=TRUE, fig.align="center", fig.width = 11, fig.height =16}
+
+## Create a bump chart
+
+spotify_followers <- Genre_popularity_long %>%
+  ggplot(aes(x = ranking_type, y = ranking, 
+             group = Artist)) +
+  
+  # Create data points for the genre
+  
+  geom_point(data = Genre_popularity_long
+             [Genre_popularity_long$genre_tag == "Rock", ],
+             aes(colour = "Rock"), size = 1) +
+  geom_point(data = Genre_popularity_long
+             [Genre_popularity_long$genre_tag == "Other", ],
+             aes(colour = "Other"), size = 1) +
+  geom_point(data = Genre_popularity_long
+             [Genre_popularity_long$genre_tag == "Hip Hop", ],
+             aes(colour = "Hip Hop"), size = 1) +
+  
+  # Connect the dots using geom_bump()
+  
+  geom_bump(data = Genre_popularity_long
+            [Genre_popularity_long$genre_tag == "Rock", ],
+            aes(colour = "Rock"), alpha = 0.2, size = 0.9) +
+  geom_bump(data = Genre_popularity_long
+            [Genre_popularity_long$genre_tag == "Other", ],
+            aes(colour = "Other"), alpha = 0.5, size = 0.9) +
+  geom_bump(data = Genre_popularity_long
+            [Genre_popularity_long$genre_tag == "Hip Hop", ],
+            aes(colour = "Hip Hop"), alpha = 0.7, size = 0.9) +
+  
+  # Print artists name next to their data points
+  
+  geom_text(data = Genre_popularity_long %>% 
+              filter(ranking_type == "rank_2010"),
+            aes(label = Artist, x = 0.55, color = genre_tag), 
+            hjust = 1, fontface = "bold", size = 3) +
+  geom_text(data = Genre_popularity_long %>%
+              filter(ranking_type == "rank_followers"),
+            aes(label = Artist, x = 2.45, color = genre_tag), 
+            hjust = 0.0, fontface = "bold", size = 3) +
+  
+  # Reverse the y-axis so the top artist appears on top
+  
+  scale_y_reverse(breaks = 1:nrow(Genre_popularity_long)) +
+  
+  # Set theme
+  
+  theme_minimal_grid(font_size = 10, line_size = 1) +
+  cowplot::theme_minimal_hgrid(font_size = 10) +
+  theme(legend.position = c(0.37, 0.99), 
+        panel.grid = 
+          element_blank(),
+        plot.title = 
+          element_text(hjust = .5, color = "black"),
+        plot.caption = 
+          element_text(hjust = .9, color = "black", size = 8),
+        plot.subtitle = 
+          element_text(hjust = .5, 
+                       color = "#9D9E92FF",
+                       size = 10),
+        axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(face = 2, 
+                                   color = "black", 
+                                   size = 10),
+        panel.background = 
+          element_rect(fill = "white"),
+        plot.background = 
+          element_rect(fill = "white")) +
+  
+  # Add title and axis labels
+  
+  labs(x = NULL,
+       title ="Popularity Changes of the Top 31 Artists")  +
+  geom_text(data = tibble(x = 0.95, y = 1:100), 
+            aes(x = x, y = y, label = y), 
+            inherit.aes = FALSE, color = "grey", size = 3) + 
+  scale_x_discrete(labels = 
+                     c("2010\nRolling Stone's Ranking", 
+                       "2023\nSpotify's Followers Ranking")) +
+  
+  # Set colour manual
+  
+  scale_color_manual(name = "Genre", values = c("Rock" = "grey", "Other" = "#F4B95AFF", "Hip Hop" = "#09979BFF", "Artist" = "#9D9E92FF"))
+
+ggplotly(spotify_followers)
+```
+
+From the interactive bump chart above that I made with ggplot and plotly, we can see that:
+
+1.  Most of the musical artists listed are categorized under the "rock music" umbrella by Spotify. In fact, **71 out of the 100 artists played rock music**, while 7 were Hip-Hop stars and 22 were neither.
+
+2.  Despite being the minority in Rolling Stone's ranking, **Hip-Hop stars outperformed their counterparts** in terms of followers on Spotify in 2023. By clicking the legends on the top right corner, we can see the changes in ranking for each genre separately.
+
+3.  On the other hand, most of artists who play music that is **neither rock nor Hip-Hop** tend to have a relatively smaller fan base on Spotify, even though they were ranked higher by Rolling Stone 13 years ago.
+
+4.  There is not a noticeable trend for the rock stars - since there are so many of them.
+
+However, this comparison is obviously not apple to apple. The list of 100 greatest artists was ranked by, according to Rolling Stone Magazine, "their peers", such as singers, producers and musicians.
+
+Therefore, the difference between the two ranking may not be due to the changes of artists' popularity over time, but simply **the taste difference between professional musicians and fans**.
+
+### 2. Heat Map: Top Tracks Ordered by Followers
+
+The Spotify API provided the popularity of the top tracks by each artist. Among the 100 greatest musical artists, are there singers who went popular because of one or a few songs? Do artists with more followers tend to have more popular tracks?
+
+```{r}
+top_tracks_heatmp <- top_tracks_full
+
+# Extract the top five tracks of each artist
+
+top_tracks_heatmp <- top_tracks_heatmp %>%
+  group_by(Artist) %>%
+  arrange(desc(popularity)) %>%
+  slice_head(n = 5)
+
+top_tracks_heatmp$Artist_ID = NULL
+
+# Assign number to the songs
+# S1 = The most popular track
+# S5 = The least popular track
+
+top_tracks_heatmp <- top_tracks_heatmp %>%
+  group_by(Artist) %>%
+  mutate(track_order = row_number()) %>%
+  ungroup()
+
+top_tracks_heatmp$track_order <- paste0("S", top_tracks_heatmp$track_order)
+
+top_tracks_heatmp$track_number = NULL
+
+top_tracks_wide <- top_tracks_heatmp%>%
+pivot_wider(names_from = track_order, values_from = popularity, values_fill = 0)
+
+colnames(top_tracks_wide) <- c("Artist", "rank_2010", "S1", "S2", "S3", "S4", "S5")
+```
+
+```{r}
+
+# Parliament Funkadelic's ID extracted wrong
+# Due to the inconsistency between their name on RS and Spotify
+# Fill in the missin values individually
+
+PF_top_tracks <-get_artist_top_tracks("6XswoC68grx55in1WQnJ7E", market = 'US',include_meta_info = FALSE)
+
+PF_top_tracks <- PF_top_tracks %>%
+  arrange(desc(popularity)) %>%
+  slice_head(n = 5)
+
+colnames(PF_top_tracks)
+
+PF_refill <- data.frame(
+  Artist = c("Parliament Funkadelic", "Parliament Funkadelic", "Parliament Funkadelic", "Parliament Funkadelic", "Parliament Funkadelic"),
+  
+  top_tracks = c(PF_top_tracks$name[1], PF_top_tracks$name[2], PF_top_tracks$name[3], PF_top_tracks$name[4], PF_top_tracks$name[5]),
+  
+  release_date = c(PF_top_tracks$album.release_date[1], PF_top_tracks$album.release_date[2], PF_top_tracks$album.release_date[3], PF_top_tracks$album.release_date[4], PF_top_tracks$album.release_date[5]),
+  
+  popularity = c(PF_top_tracks$popularity[1], PF_top_tracks$popularity[2], PF_top_tracks$popularity[3], PF_top_tracks$popularity[4], PF_top_tracks$popularity[5]),
+  
+  rank_2010 = c(58, 58, 58, 58, 58),
+  track_order = c("S1", "S2", "S3", "S4", "S5")
+)
+
+top_tracks_heatmp_filled <- rbind(top_tracks_heatmp, PF_refill)
+
+# Add a column of artists' follower ranking
+# By merging the tables
+
+colnames(top_tracks_heatmp_filled)[colnames(top_tracks_heatmp_filled) == "popularity"] <- "song_popularity"
+
+popularity_table <- top100_table_popularity
+colnames(popularity_table)[colnames(popularity_table) == "Number"] <- "rank_2010"
+popularity_table$Artist_ID = NULL
+popularity_table$followers = NULL
+popularity_table$popularity = NULL
+popularity_table$rank_popularity = NULL
+
+top_tracks_heatmp_final <- 
+  left_join(top_tracks_heatmp_filled, popularity_table, 
+            by = c("rank_2010"))
+
+colnames(top_tracks_heatmp_final)[colnames(top_tracks_heatmp_final) == "Artist.x"] <- "Artist"
+top_tracks_heatmp_final$Artist.y = NULL
+
+```
+
+```{r}
+
+# Write and read the csv to save knitting time
+
+write.csv(top_tracks_heatmp_final, "top_tracks_heatmp_final.csv", row.names=FALSE)
+```
+
+```{r eval=TRUE}
+top_tracks_heatmp_final <- read.csv("top_tracks_heatmp_final.csv")
+```
+
+```{r eval=TRUE, fig.align="center", fig.width = 11, fig.height =16}
+
+# Create a heat map for the top tracks
+
+pal <- wes_palette("Zissou1", 100, type = "continuous")
+
+# Create a column as the text box
+
+top_track_df_new <- top_tracks_heatmp_final %>%
+  mutate(text = paste0("Artist: ", Artist,"\n", "Song: ", top_tracks, "\n", "Release Date: ", release_date, "\n", "Song Popularity: ", song_popularity, "\n", "Artist's Rank on Rolling Stone: ", rank_2010, "\n", "Artist's Rank on Followers: ", rank_followers))
+
+heat_mp <- ggplot(top_track_df_new, 
+                  aes(track_order, 
+                      reorder(Artist, -rank_followers), 
+                      fill= song_popularity, 
+                      text=text)) + 
+  scale_fill_gradientn(colours = pal)+
+  geom_tile() +
+  labs(title = "Top Tracks of the Top 100 Artists", 
+       x = "Top Five Tracks")+
+  theme_minimal_grid(font_size = 10, line_size = 1) +
+  cowplot::theme_minimal_hgrid(font_size = 10) +
+  theme(panel.grid = element_blank(),
+        plot.title = 
+          element_text(hjust = .5, color = "black"),
+        axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = 
+          element_text(face = 2, color = "black", size = 10),
+        axis.title.y = element_blank(),
+        axis.text.x = 
+          element_text(face = 2, color = "black", size = 10),
+        axis.title.x = 
+          element_text(face = 2, color = "black", size = 10),
+        panel.background = element_rect(fill = "white"),
+        plot.background = element_rect(fill = "white"))  
+
+ggplotly(heat_mp, tooltip="text")
+```
+
+The above is a heatmap that lists out the top five popular songs created by each artist, ranked from the biggest fan base to the least one:
+
+1.  Eminem, as the artist with most followers on Spotify, has the most popular song tracks - all of his songs are in dark red.
+
+2.  Overall, artists with more followers indeed tend to have more great hits, with some exceptions.
+
+For example, Chuck Berry has a great hit "Run Rudolph Run" despite his fan base is not as strong on the music platform. Black Sabbath and Neil Young were followed by many but their songs were as popular. The mouse over text box showed the track name, its release date and the followers ranking of the corresponding artists.
+
+### 3. Dumbbell: Years Active (on Spotify)
+
+Do the fame of the older artists and bands inevitable fade away? Do artists attract more followers if they continue to release albums? How long have the artists been available on Spotify?
+
+In this part, we will use a dumbbell chart to answer these questions.
+
+```{r}
+
+### Clean the data of artist albums
+
+Artist_debut_year <- album_df_full
+
+# Modify the data format of release data to year
+# From character to numeric
+
+Artist_debut_year$release_year <- ifelse(nchar(Artist_debut_year$release_date) > 4, str_sub(Artist_debut_year$release_date,1, 4), Artist_debut_year$release_date)
+
+as.numeric(Artist_debut_year$release_year)
+
+# Extract the release year of the first album
+
+Artist_first_album <- Artist_debut_year %>%
+  group_by(Artist) %>%
+  summarize(first_album_date = 
+              min(release_year), Artist_ID = Artist_ID)
+
+Artist_first_album <- Artist_first_album[!duplicated(Artist_first_album), ]
+
+# Extract the release year of the last album
+
+Artist_latest_album <- Artist_debut_year %>%
+  group_by(Artist) %>%
+  summarize(latest_album_date = 
+              max(release_year), Artist_ID = Artist_ID)
+
+Artist_latest_album <- Artist_latest_album[!duplicated(Artist_latest_album), ]
+
+# Merge the table
+
+album_release_year <- left_join(Artist_first_album, Artist_latest_album, by = c("Artist", "Artist_ID"))
+
+```
+
+```{r}
+Genre_popularity$Artist_ID[Genre_popularity$Artist == "Parliament Funkadelic"] <- "6XswoC68grx55in1WQnJ7E"
+```
+
+```{r}
+
+# Merge for ranking of followers
+
+followers_table <- Genre_popularity
+
+followers_table$followers = NULL
+followers_table$popularity = NULL
+followers_table$rank_popularity = NULL
+
+album_year_fol <- left_join(album_release_year, 
+                            followers_table, by = "Artist_ID")
+
+# Clean data and covert into number
+
+colnames(album_year_fol)[colnames(album_year_fol) == "Artist.x"] <- "Artist"
+album_year_fol$Artist.y = NULL
+
+album_year_fol$first_album_date <- as.numeric(album_year_fol$first_album_date)
+
+album_year_fol$latest_album_date <- as.numeric(album_year_fol$latest_album_date)
+
+album_year_fol <- album_year_fol %>%
+  mutate(duration = latest_album_date - first_album_date)
+
+
+```
+
+```{r}
+write.csv(album_year_fol, "album_year_fol.csv", row.names=FALSE) 
+```
+
+```{r eval=TRUE}
+album_year_fol <- read.csv("album_year_fol.csv")
+```
+
+```{r eval=TRUE, fig.align="center", fig.width = 11, fig.height =16}
+
+theme_set(theme_bw())
+
+gapminder <- pivot_longer(album_year_fol, cols=c('first_album_date', "latest_album_date"),
+                    names_to='album_order',
+                    values_to='date')
+
+gapminder <- gapminder %>%
+  mutate(paired = rep(1:(n()/2),each=2),
+         year=factor(date))
+
+gapminder_long <- gapminder %>%
+  mutate(text = paste0("Artist: ", Artist,"\n", "Album Release Year: ", date, "\n", "Follower Ranking: ", rank_followers))
+
+dumbbell <- gapminder_long %>% 
+  ggplot(aes(x = date, y = reorder(Artist, -rank_followers), 
+             text = text)) +
+  geom_line(aes(group = paired)) +
+  geom_point(data = gapminder_long[gapminder_long$album_order == "first_album_date", ],
+             aes(colour = "First Album"), size = 4) +
+  geom_point(data = gapminder_long[gapminder_long$album_order == "latest_album_date", ],
+             aes(colour = "Latest Album"), size = 4) +
+  theme(legend.position = "top") +
+  labs(title = "Timeline of Album Availability for the Top 100 Artists on Spotify", x = "Year", y = "Artists") +
+  cowplot::theme_minimal_hgrid(font_size = 10) +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(hjust = 0.5, color = "black"),
+    axis.line = element_blank(),
+    axis.ticks = element_blank(),
+    axis.text.y = element_text(face = 2, color = "black", size = 10),
+    axis.title.y = element_blank(),
+    axis.text.x = element_text(face = 2, color = "black", size = 10),
+    axis.title.x = element_text(face = 2, color = "black", size = 10),
+    panel.background = element_rect(fill = "white"),
+    plot.background = element_rect(fill = "white")
+  ) +
+  scale_color_manual(
+    name = "Album Order",
+    values = c("First Album" = "#09979BFF", "Latest Album" = "#F4B95AFF")
+  )
+
+ggplotly(dumbbell, tooltip = "text")
+
+```
+
+This dumbbell graphic is again ordered in the number of followers. It is made with the simple geom_point() and geom_line() function and converted to an interactive graph using ploty. One thing that took me a lot time to deal with is that I forgot to set the limit argument to maximum, leading to most of the date unmatched to the truth. I rerun the loop to tackle that problem.
+
+Using this dumbbell graph, we can see the active period of the artists, i.e. the period between their first album and their last release album, and which generation they belong to.
+
+1.  Most, if not all, have released album on the music platform within recent three years. However, that included plenty of remastered albums, therefore it cannot be interpreted as the artists still being active to this date.
+2.  Most of the artists from earlier generation have fewer followers on Spotify, which verified the belief that Spotify users prefer newer music over the old ones, except for the classics such as The Beatles.
+
+## Appendix: All code in this assignment
+
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
